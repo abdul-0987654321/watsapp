@@ -1,5 +1,7 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
+const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
@@ -85,6 +87,31 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ====== QR CODE WEB VIEWER (Railway ke liye) ======
+let currentQR = null;
+
+const app = express();
+app.get('/qr', async (req, res) => {
+  if (!currentQR) {
+    res.send('<h2>QR abhi generate nahi hua, ya bot already connected hai. Page refresh karte rahein.</h2>');
+    return;
+  }
+  const qrImage = await QRCode.toDataURL(currentQR);
+  res.send(`
+    <html>
+      <body style="text-align:center; font-family:sans-serif;">
+        <h2>WhatsApp QR Scan Karein</h2>
+        <img src="${qrImage}" />
+        <p>Yeh page 10 second baad refresh hoga</p>
+        <script>setTimeout(()=>location.reload(), 10000)</script>
+      </body>
+    </html>
+  `);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🌐 QR page chal raha hai port ${PORT} pe (/qr par jayein)`));
+
 // ====== WhatsApp Client ======
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -102,16 +129,15 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
-  console.log('\n📱 QR code scan karein WhatsApp > Linked Devices se:\n');
+  console.log('\n📱 QR code scan karein WhatsApp > Linked Devices se (ya /qr URL kholen):\n');
   qrcode.generate(qr, { small: true });
+  currentQR = qr;
 });
 
 client.on('ready', async () => {
   console.log('✅ Bot ready hai!');
   console.log('Bot number:', client.info.wid._serialized);
-  
-  // Test message owner ko
- 
+  currentQR = null;
 });
 
 client.on('disconnected', (reason) => {
