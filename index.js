@@ -87,7 +87,9 @@ function delay(ms) {
 
 // ====== WhatsApp Client ======
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'session') }),
+  authStrategy: new LocalAuth({
+    dataPath: path.join(__dirname, 'session')
+  }),
   puppeteer: {
     headless: true,
     args: [
@@ -96,13 +98,10 @@ const client = new Client({
       '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
-    ],
-  },
-  webVersionCache: {
-    type: 'remote',
-    remotePath:
-      'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1015901620-alpha.html',
-  },
+      '--no-zygote',
+      '--single-process'
+    ]
+  }
 });
 
 client.on('qr', (qr) => {
