@@ -1,16 +1,37 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const qrcode = require('qrcode-terminal'); // npm install qrcode-terminal
 const fs = require('fs');
 const path = require('path');
 
 // ====== SETTINGS ======
 const ORDERS_FILE = path.join(__dirname, 'orders.json');
-const MIN_DELAY_MS = 1500;
+const OWNER_NUMBER = '923488186229@s.whatsapp.net'; // Baileys format
 
-// Owner ka number — jab order complete ho tab yahan message jayega
-const OWNER_NUMBER = '923488186229@c.us'; // +92 format, @c.us zaroori hai
+// ====== SESSION CLEANUP ======
+// Memory leak fix: 30 min baad purane sessions delete kar do
+const sessions = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, s] of sessions) {
+    if (s.lastSeen < cutoff) sessions.delete(id);
+  }
+}, 5 * 60 * 1000);
 
-// ====== UPDATED MENU (screenshot se) ======
+function getSession(id) {
+  if (!sessions.has(id)) {
+    sessions.set(id, { step: 'idle', cart: [], name: null, address: null, lastSeen: Date.now() });
+  }
+  const s = sessions.get(id);
+  s.lastSeen = Date.now();
+  return s;
+}
+
+function resetSession(id) {
+  sessions.set(id, { step: 'idle', cart: [], name: null, address: null, lastSeen: Date.now() });
+}
+
+// ====== MENU ======
 const MENU = [
   { id: '1', name: 'Single Without Kabab', price: 470 },
   { id: '2', name: 'Special',              price: 740 },
@@ -18,335 +39,247 @@ const MENU = [
   { id: '4', name: 'Pulao Kabab',          price: 390 },
   { id: '5', name: 'Pulao',                price: 290 },
   { id: '6', name: 'Single',               price: 570 },
-  { id: '7', name: 'Zarda',               price: 200 },
-  { id: '8', name: 'Shami Kabab 12 Pcs',  price: 600 },
+  { id: '7', name: 'Zarda',                price: 200 },
+  { id: '8', name: 'Shami Kabab 12 Pcs',   price: 600 },
 ];
 
-// ====== Session store ======
-const sessions = {};
-
-function getSession(id) {
-  if (!sessions[id]) {
-    sessions[id] = { step: 'idle', cart: [], name: null, address: null };
-  }
-  return sessions[id];
-}
-
-function resetSession(id) {
-  sessions[id] = { step: 'idle', cart: [], name: null, address: null };
-}
-
-// ====== Helper: Menu text ======
 function formatMenu() {
-  let text = '🍽️ *Hamara Menu*\n';
-  text += '─────────────────\n';
+  let text = '🍽️ *Hamara Menu*\n─────────────────\n';
   MENU.forEach(item => {
     text += `*${item.id}.* ${item.name} — PKR ${item.price}\n`;
   });
-  text += '─────────────────\n';
-  text += '📌 *Order karne ka tarika:*\n';
-  text += 'Sirf item number bhejein\n';
-  text += 'Jaise: *1* ya *1,3,5*\n\n';
-  text += '❌ Cancel karne ke liye: *cancel*';
-  return text;
+  return text + '─────────────────\nItem number bhejein (jaise *1* ya *1,3*)\n❌ Cancel: *cancel*';
 }
 
-// ====== Helper: Cart summary ======
 function calculateCart(cart) {
   let total = 0;
-  let text = '🛒 *Aapka Cart:*\n';
-  text += '─────────────────\n';
+  let text = '🛒 *Aapka Cart:*\n─────────────────\n';
   cart.forEach(item => {
-    text += `• ${item.qty}x ${item.name}\n`;
-    text += `  PKR ${item.price} × ${item.qty} = *PKR ${item.qty * item.price}*\n`;
-    total += item.qty * item.price;
+    const sub = item.qty * item.price;
+    text += `• ${item.qty}x ${item.name} = *PKR ${sub}*\n`;
+    total += sub;
   });
-  text += '─────────────────\n';
-  text += `💰 *Total: PKR ${total}*`;
-  return { text, total };
+  return { text: text + `─────────────────\n💰 *Total: PKR ${total}*`, total };
 }
 
-// ====== Helper: Save order to file ======
-function saveOrder(order) {
+// Async file save (blocking nahi karega)
+async function saveOrder(order) {
   let orders = [];
-  if (fs.existsSync(ORDERS_FILE)) {
-    try {
-      orders = JSON.parse(fs.readFileSync(ORDERS_FILE, 'utf-8'));
-    } catch {
-      orders = [];
-    }
-  }
+  try {
+    const raw = await fs.promises.readFile(ORDERS_FILE, 'utf-8');
+    orders = JSON.parse(raw);
+  } catch {}
   orders.push(order);
-  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2));
+  await fs.promises.writeFile(ORDERS_FILE, JSON.stringify(orders, null, 2));
 }
 
-// ====== Helper: Delay ======
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+// ====== MAIN BOT ======
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('./session');
 
-// ====== WhatsApp Client ======
+  const sock = makeWASocket({
+  auth: state,
+  // printQRInTerminal: true  <-- yeh hata do
+  browser: ['MyBot', 'Chrome', '120.0.0'],  // Ubuntu ki jagah generic name
+  connectTimeoutMs: 60000,
+  defaultQueryTimeoutMs: 60000,
+});
+
+  sock.ev.on('creds.update', saveCreds);
+
+ sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+  // QR aaye to print karo
+  if (qr) {
+    console.log('\n📱 QR scan karein:\n');
+    qrcode.generate(qr, { small: true });
+  }
+
+  if (connection === 'close') {
+    const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+    const shouldReconnect = code !== DisconnectReason.loggedOut;
+    console.log('Disconnected, code:', code, '| Reconnect:', shouldReconnect);
+    if (shouldReconnect) setTimeout(startBot, 5000);
+  } else if (connection === 'open') {
+    console.log('✅ Bot connected!');
+  }
+});
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
+
+      const from = msg.key.remoteJid;
+      if (from.endsWith('@g.us')) continue; // Groups skip
+
+      const body = (
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text || ''
+      ).trim();
+
+      if (!body) continue;
+
+      const session = getSession(from);
+
+      const reply = async (text) => {
+        await sock.sendMessage(from, { text });
+      };
+
+      try {
+        // ---- RESET ----
+        if (/^(hi|hello|salam|assalam|start|menu|order|haan|ji\s*haan)$/i.test(body)) {
+          resetSession(from);
+          getSession(from).step = 'browsing';
+          await reply(`Assalam-o-Alaikum! 👋\n\n${formatMenu()}`);
+          continue;
+        }
+
+        if (/^cancel$/i.test(body)) {
+          resetSession(from);
+          await reply('❌ *Order cancel ho gaya.*\nDobara order ke liye *menu* likhein.');
+          continue;
+        }
+
+        // ---- BROWSING ----
+        if (session.step === 'browsing' || session.step === 'confirm_more') {
+          if (session.step === 'confirm_more' && /^done$/i.test(body)) {
+            if (!session.cart.length) {
+              session.step = 'browsing';
+              await reply(`Cart khali hai.\n\n${formatMenu()}`);
+              continue;
+            }
+            session.step = 'ask_name';
+            await reply('👤 Apna *naam* bhejein:');
+            continue;
+          }
 const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: path.join(__dirname, 'session')
-  }),
+  authStrategy: new LocalAuth({ dataPath: './session' }),
   puppeteer: {
     headless: true,
-    executablePath: process.env.CHROME_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
-    ]
-  }
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',        // RAM bahut kam ho jati hai
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--safebrowsing-disable-auto-update',
+    ],
+  },
 });
+          const ids = body.split(',').map(s => s.trim());
+          const valid = ids.map(id => MENU.find(m => m.id === id)).filter(Boolean);
+          const invalid = ids.filter(id => !MENU.find(m => m.id === id));
 
-client.on('qr', (qr) => {
-  console.log('\n📱 QR code scan karein WhatsApp > Linked Devices se:\n');
-  qrcode.generate(qr, { small: true });
-});
+          if (!valid.length) {
+            await reply('❓ Yeh number menu mein nahi hai.\nMenu ke liye *menu* likhein.');
+            continue;
+          }
 
-client.on('ready', async () => {
-  console.log('✅ Bot ready hai!');
-  console.log('Bot number:', client.info.wid._serialized);
-  
-  // Test message owner ko
- 
-});
+          valid.forEach(item => {
+            const ex = session.cart.find(c => c.id === item.id);
+            if (ex) ex.qty++;
+            else session.cart.push({ ...item, qty: 1 });
+          });
 
-client.on('disconnected', (reason) => {
-  console.log('❌ Disconnect ho gaya:', reason);
-  // Auto reconnect
-  setTimeout(() => {
-    console.log('🔄 Reconnect ho raha hai...');
-    client.initialize();
-  }, 5000);
-});
-
-// ====== Message Handler ======
-client.on('message', async (msg) => {
-  // Sirf personal chats handle karo
-  const chat = await msg.getChat();
-  if (chat.isGroup) return;
-
-  const from = msg.from;
-  const body = msg.body.trim();
-  const session = getSession(from);
-
-  try {
-    await delay(MIN_DELAY_MS);
-
-    // ---- RESET / START commands ----
-    if (/^(hi|hello|salam|assalam|start|menu|order|haan|ji\s*haan)$/i.test(body)) {
-      resetSession(from);
-      const s = getSession(from);
-      s.step = 'browsing';
-      await msg.reply(
-        `Assalam-o-Alaikum! 👋\nKhush Amdeed!\n\n${formatMenu()}`
-      );
-      return;
-    }
-
-    if (/^cancel$/i.test(body)) {
-      resetSession(from);
-      await msg.reply(
-        '❌ *Order cancel ho gaya.*\n\nDobara order karne ke liye *menu* likhein. 😊'
-      );
-      return;
-    }
-
-    // ---- BROWSING: item numbers ----
-    if (session.step === 'browsing') {
-      const ids = body.split(',').map(s => s.trim());
-      const validItems = [];
-      const invalidIds = [];
-
-      ids.forEach(id => {
-        const item = MENU.find(m => m.id === id);
-        if (item) validItems.push(item);
-        else invalidIds.push(id);
-      });
-
-      if (validItems.length === 0) {
-        await msg.reply(
-          `❓ Yeh number menu mein nahi hai.\n\nMenu dekhne ke liye *menu* likhein.`
-        );
-        return;
-      }
-
-      validItems.forEach(item => {
-        const existing = session.cart.find(c => c.id === item.id);
-        if (existing) existing.qty += 1;
-        else session.cart.push({ ...item, qty: 1 });
-      });
-
-      session.step = 'confirm_more';
-      const { text } = calculateCart(session.cart);
-
-      let reply = text;
-      if (invalidIds.length > 0) {
-        reply += `\n\n⚠️ Yeh number menu mein nahi: *${invalidIds.join(', ')}*`;
-      }
-      reply += '\n\n➕ Aur items add karne ke liye number bhejein\n✅ Order confirm karne ke liye *done* likhein';
-
-      await msg.reply(reply);
-      return;
-    }
-
-    // ---- CONFIRM MORE: "done" ya aur items ----
-    if (session.step === 'confirm_more') {
-      if (/^done$/i.test(body)) {
-        if (session.cart.length === 0) {
-          session.step = 'browsing';
-          await msg.reply(`Cart khali hai.\n\n${formatMenu()}`);
-          return;
-        }
-        session.step = 'ask_name';
-        await msg.reply(
-          '👤 Apna *naam* bhejein:'
-        );
-        return;
-      }
-
-      // Aur items add karo
-      const ids = body.split(',').map(s => s.trim());
-      const validItems = [];
-      ids.forEach(id => {
-        const item = MENU.find(m => m.id === id);
-        if (item) validItems.push(item);
-      });
-
-      if (validItems.length === 0) {
-        await msg.reply(
-          '❓ Number samajh nahi aaya.\n\nItems add karne ke liye number bhejein, ya *done* likhein.'
-        );
-        return;
-      }
-
-      validItems.forEach(item => {
-        const existing = session.cart.find(c => c.id === item.id);
-        if (existing) existing.qty += 1;
-        else session.cart.push({ ...item, qty: 1 });
-      });
-
-      const { text } = calculateCart(session.cart);
-      await msg.reply(`${text}\n\n➕ Aur add karein ya *done* likhein.`);
-      return;
-    }
-
-    // ---- ASK NAME ----
-    if (session.step === 'ask_name') {
-      if (body.length < 2) {
-        await msg.reply('⚠️ Sahi naam likhein please.');
-        return;
-      }
-      session.name = body;
-      session.step = 'ask_address';
-      await msg.reply('📍 Delivery *address* bhejein\n(Gali, Muhalla, City):');
-      return;
-    }
-
-    // ---- ASK ADDRESS ----
-    if (session.step === 'ask_address') {
-      if (body.length < 5) {
-        await msg.reply('⚠️ Thoda detail mein address likhein please.');
-        return;
-      }
-      session.address = body;
-      session.step = 'ask_phone';
-      await msg.reply('📞 Apna *contact number* bhejein:');
-      return;
-    }
-
-    // ---- ASK PHONE ----
-    if (session.step === 'ask_phone') {
-      if (!/^[0-9+\s\-]{10,15}$/.test(body)) {
-        await msg.reply('⚠️ Sahi phone number bhejein (jaise: 03001234567)');
-        return;
-      }
-      session.phone = body;
-      session.step = 'final_confirm';
-
-      const { text, total } = calculateCart(session.cart);
-      await msg.reply(
-        `📋 *Order Summary:*\n\n` +
-        `${text}\n\n` +
-        `👤 Naam: *${session.name}*\n` +
-        `📍 Address: *${session.address}*\n` +
-        `📞 Phone: *${session.phone}*\n\n` +
-        `─────────────────\n` +
-        `✅ Confirm karne ke liye *yes* likhein\n` +
-        `❌ Cancel karne ke liye *cancel* likhein`
-      );
-      return;
-    }
-
-    // ---- FINAL CONFIRMATION ----
-    if (session.step === 'final_confirm') {
-      if (/^(yes|haan|ji|confirm|ok|okay|ha)$/i.test(body)) {
-        const { total } = calculateCart(session.cart);
-        const order = {
-          orderId: 'ORD' + Date.now(),
-          customerPhone: from,
-          name: session.name,
-          address: session.address,
-          phone: session.phone,
-          items: session.cart,
-          total,
-          timestamp: new Date().toISOString(),
-          status: 'pending',
-        };
-        saveOrder(order);
-
-        // Customer ko confirmation
-        await msg.reply(
-          `🎉 *Order Confirm Ho Gaya!*\n\n` +
-          `🆔 Order ID: *${order.orderId}*\n` +
-          `💰 Total: *PKR ${total}*\n\n` +
-          `⏳ Aapka order jald deliver ho ga.\n` +
-          `Shukriya! 🙏`
-        );
-
-        // ---- Owner ko notification ----
-        await delay(1000);
-        const ownerMsg =
-          `🔔 *Naya Order Aya!*\n\n` +
-          `🆔 *${order.orderId}*\n` +
-          `─────────────────\n` +
-          `👤 Naam: ${order.name}\n` +
-          `📞 Phone: ${order.phone}\n` +
-          `📍 Address: ${order.address}\n` +
-          `─────────────────\n` +
-          `🛒 *Items:*\n` +
-          order.items.map(i => `• ${i.qty}x ${i.name} = PKR ${i.qty * i.price}`).join('\n') +
-          `\n─────────────────\n` +
-          `💰 *Total: PKR ${total}*\n` +
-          `🕐 Time: ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}`;
-
-        try {
-          await client.sendMessage(OWNER_NUMBER, ownerMsg);
-          console.log(`✅ Owner ko notify kar diya — ${order.orderId}`);
-        } catch (err) {
-          console.error('❌ Owner notification fail:', err.message);
+          session.step = 'confirm_more';
+          const { text } = calculateCart(session.cart);
+          let r = text;
+          if (invalid.length) r += `\n\n⚠️ Menu mein nahi: *${invalid.join(', ')}*`;
+          r += '\n\n➕ Aur add karein ya *done* likhein';
+          await reply(r);
+          continue;
         }
 
-        resetSession(from);
-      } else {
-        await msg.reply(
-          'Confirm karne ke liye *yes* likhein\nCancel karne ke liye *cancel* likhein'
-        );
+        // ---- ASK NAME ----
+        if (session.step === 'ask_name') {
+          if (body.length < 2) { await reply('⚠️ Sahi naam likhein.'); continue; }
+          session.name = body;
+          session.step = 'ask_address';
+          await reply('📍 Delivery *address* bhejein (Gali, Muhalla, City):');
+          continue;
+        }
+
+        // ---- ASK ADDRESS ----
+        if (session.step === 'ask_address') {
+          if (body.length < 5) { await reply('⚠️ Thoda detail mein address likhein.'); continue; }
+          session.address = body;
+          session.step = 'ask_phone';
+          await reply('📞 *Contact number* bhejein:');
+          continue;
+        }
+
+        // ---- ASK PHONE ----
+        if (session.step === 'ask_phone') {
+          if (!/^[0-9+\s\-]{10,15}$/.test(body)) {
+            await reply('⚠️ Sahi number bhejein (jaise: 03001234567)');
+            continue;
+          }
+          session.phone = body;
+          session.step = 'final_confirm';
+          const { text, total } = calculateCart(session.cart);
+          await reply(
+            `📋 *Order Summary:*\n\n${text}\n\n` +
+            `👤 Naam: *${session.name}*\n📍 Address: *${session.address}*\n📞 Phone: *${session.phone}*\n\n` +
+            `✅ *yes* likhein confirm ke liye\n❌ *cancel* likhein`
+          );
+          continue;
+        }
+
+        // ---- FINAL CONFIRM ----
+        if (session.step === 'final_confirm') {
+          if (/^(yes|haan|ji|confirm|ok|okay|ha)$/i.test(body)) {
+            const { total } = calculateCart(session.cart);
+            const order = {
+              orderId: 'ORD' + Date.now(),
+              customerPhone: from,
+              name: session.name,
+              address: session.address,
+              phone: session.phone,
+              items: session.cart,
+              total,
+              timestamp: new Date().toISOString(),
+              status: 'pending',
+            };
+            await saveOrder(order);
+
+            await reply(
+              `🎉 *Order Confirm!*\n🆔 ${order.orderId}\n💰 PKR ${total}\n\n⏳ Jald deliver ho ga. Shukriya! 🙏`
+            );
+
+            const ownerMsg =
+              `🔔 *Naya Order!*\n🆔 ${order.orderId}\n` +
+              `👤 ${order.name} | 📞 ${order.phone}\n📍 ${order.address}\n` +
+              order.items.map(i => `• ${i.qty}x ${i.name} = PKR ${i.qty * i.price}`).join('\n') +
+              `\n💰 *Total: PKR ${total}*\n🕐 ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}`;
+
+            await sock.sendMessage(OWNER_NUMBER, { text: ownerMsg });
+            resetSession(from);
+          } else {
+            await reply('*yes* likhein confirm ke liye ya *cancel* likhein.');
+          }
+          continue;
+        }
+
+        // ---- DEFAULT ----
+        await reply('Assalam-o-Alaikum! 👋\nOrder ke liye *menu* likhein. 😊');
+
+      } catch (err) {
+        console.error('Message handling error:', err);
       }
-      return;
     }
+  });
+}
 
-    // ---- DEFAULT / IDLE ----
-    await msg.reply(
-      `Assalam-o-Alaikum! 👋\n\nOrder karne ke liye *menu* likhein. 😊`
-    );
-
-  } catch (err) {
-    console.error('Error handling message:', err);
-  }
-});
-
-client.initialize();
+startBot();
