@@ -1,7 +1,7 @@
 'use strict';
 
 // ============================================================
-//  WhatsApp Order Bot  —  Single-file, production ready
+//  WhatsApp Order Bot  —  Production Ready
 //  QR: visit your Railway domain to scan
 // ============================================================
 
@@ -12,24 +12,61 @@ const fs                   = require('fs');
 const path                 = require('path');
 
 // ─── CONFIG ─────────────────────────────────────────────────
-const OWNER_NUMBER = '923488186229@c.us';
-const ORDERS_FILE  = path.join(__dirname, 'orders.json');
-const PORT         = process.env.PORT || 3000;
-const SESSION_TTL  = 30 * 60 * 1000;   // 30 min idle = session clear
-const RECONNECT_MS = 5_000;
+const OWNER_NUMBER  = '923488186229@c.us';
+const ORDERS_FILE   = path.join(__dirname, 'orders.json');
+const PORT          = process.env.PORT || 3000;
+const SESSION_TTL   = 30 * 60 * 1000;  // 30 min idle → session clear
+const RECONNECT_MS  = 5_000;
+
+// Delay between bot replies (prevents WhatsApp ban)
+const REPLY_DELAY_MIN = 1500;  // ms
+const REPLY_DELAY_MAX = 3000;  // ms
 // ────────────────────────────────────────────────────────────
 
-// ─── MENU ───────────────────────────────────────────────────
+// ─── MENU (from restaurant image) ───────────────────────────
 const MENU = [
-  { id: '1', name: 'Single Without Kabab',  price: 470 },
-  { id: '2', name: 'Special',               price: 740 },
-  { id: '3', name: 'Special Without Kabab', price: 640 },
-  { id: '4', name: 'Pulao Kabab',           price: 390 },
-  { id: '5', name: 'Pulao',                 price: 290 },
-  { id: '6', name: 'Single',                price: 570 },
-  { id: '7', name: 'Zarda',                 price: 200 },
-  { id: '8', name: 'Shami Kabab 12 Pcs',    price: 600 },
+  { id: '1',  name: 'Chicken Roast (Full)',  price: 1350, desc: 'One Roasted Chicken with Ketchup & Fresh Lemons' },
+  { id: '2',  name: 'Chicken Roast (Half)',  price: 700,  desc: 'One Roasted Chicken with Ketchup & Fresh Lemons' },
+  { id: '3',  name: 'Shami Kabab (12 Pcs)', price: 600,  desc: 'Served with fresh Salad and traditional Raita' },
+  { id: '4',  name: 'Chicken Piece',        price: 180,  desc: 'Steam Piece 1/8 — Chest, Leg, Thigh or Wing' },
+  { id: '5',  name: 'Salad',                price: 20,   desc: '' },
+  { id: '6',  name: 'Raita',                price: 20,   desc: '' },
+  { id: '7',  name: 'Kheer',                price: 180,  desc: '' },
+  { id: '8',  name: 'Zarda',                price: 180,  desc: 'Traditional Colourful Rice Sweet Dish with Chamcham & Raisins' },
 ];
+// ────────────────────────────────────────────────────────────
+
+// ─── HELPERS ────────────────────────────────────────────────
+function randomDelay() {
+  const ms = Math.floor(Math.random() * (REPLY_DELAY_MAX - REPLY_DELAY_MIN + 1)) + REPLY_DELAY_MIN;
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function formatMenu() {
+  let t = '🍽️ *Menu*\n━━━━━━━━━━━━━━━━━\n';
+  for (const item of MENU) {
+    t += `*${item.id}.* ${item.name} — *Rs. ${item.price}*`;
+    if (item.desc) t += `\n    _${item.desc}_`;
+    t += '\n';
+  }
+  t += '━━━━━━━━━━━━━━━━━\n';
+  t += '📌 Item number bhejein — jaise *1* ya *2,4*\n';
+  t += '❌ Cancel: *cancel*';
+  return t;
+}
+
+function buildCart(cart) {
+  let total = 0;
+  let t = '🛒 *Aapka Cart:*\n━━━━━━━━━━━━━━━━━\n';
+  for (const item of cart) {
+    const sub = item.qty * item.price;
+    t += `• ${item.qty}x ${item.name}\n`;
+    t += `  Rs. ${item.price} × ${item.qty} = *Rs. ${sub}*\n`;
+    total += sub;
+  }
+  t += `━━━━━━━━━━━━━━━━━\n💰 *Total: Rs. ${total}*`;
+  return { text: t, total };
+}
 // ────────────────────────────────────────────────────────────
 
 // ─── SESSION MANAGER ────────────────────────────────────────
@@ -64,33 +101,7 @@ function resetSession(id) {
 }
 // ────────────────────────────────────────────────────────────
 
-// ─── TEXT HELPERS ────────────────────────────────────────────
-function formatMenu() {
-  let t = '🍽️ *Hamara Menu*\n━━━━━━━━━━━━━━━━━\n';
-  for (const item of MENU) {
-    t += `*${item.id}.* ${item.name} — *PKR ${item.price}*\n`;
-  }
-  t += '━━━━━━━━━━━━━━━━━\n';
-  t += '📌 Item number bhejein — jaise *1* ya *2,5*\n';
-  t += '❌ Cancel karne ke liye: *cancel*';
-  return t;
-}
-
-function buildCart(cart) {
-  let total = 0;
-  let t = '🛒 *Aapka Cart:*\n━━━━━━━━━━━━━━━━━\n';
-  for (const item of cart) {
-    const sub = item.qty * item.price;
-    t += `• ${item.qty}x ${item.name}\n`;
-    t += `  PKR ${item.price} × ${item.qty} = *PKR ${sub}*\n`;
-    total += sub;
-  }
-  t += `━━━━━━━━━━━━━━━━━\n💰 *Total: PKR ${total}*`;
-  return { text: t, total };
-}
-// ────────────────────────────────────────────────────────────
-
-// ─── ORDER PERSISTENCE ──────────────────────────────────────
+// ─── ORDER SAVE ─────────────────────────────────────────────
 async function saveOrder(order) {
   let orders = [];
   try {
@@ -102,8 +113,8 @@ async function saveOrder(order) {
 // ────────────────────────────────────────────────────────────
 
 // ─── QR WEB SERVER ──────────────────────────────────────────
-let currentQR  = null;
-let botReady   = false;
+let currentQR = null;
+let botReady  = false;
 
 const HTML = (body) => `<!DOCTYPE html>
 <html lang="en">
@@ -118,11 +129,12 @@ const HTML = (body) => `<!DOCTYPE html>
     .card{background:#fff;border-radius:16px;padding:40px;text-align:center;
           box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:420px;width:90%}
     h1{font-size:1.4rem;color:#111;margin-bottom:8px}
-    p{color:#555;font-size:.95rem;line-height:1.5;margin-bottom:20px}
+    p{color:#555;font-size:.95rem;line-height:1.6;margin-bottom:20px}
     img{border-radius:12px;border:3px solid #25D366;width:260px}
-    .badge{display:inline-block;background:#25D366;color:#fff;
+    .badge-green{display:inline-block;background:#25D366;color:#fff;
            border-radius:999px;padding:6px 18px;font-size:.85rem;margin-top:16px}
-    .warn{color:#e67e22}
+    .badge-orange{display:inline-block;background:#f39c12;color:#fff;
+           border-radius:999px;padding:6px 18px;font-size:.85rem;margin-top:16px}
   </style>
 </head>
 <body><div class="card">${body}</div></body>
@@ -135,7 +147,7 @@ const server = http.createServer(async (req, res) => {
     res.end(HTML(`
       <h1>✅ Bot Online</h1>
       <p>WhatsApp bot successfully connected.<br/>No action needed.</p>
-      <span class="badge">🟢 Connected</span>
+      <span class="badge-green">🟢 Connected</span>
     `));
     return;
   }
@@ -144,7 +156,8 @@ const server = http.createServer(async (req, res) => {
     res.end(HTML(`
       <h1>⏳ Starting Up…</h1>
       <p>QR code generate ho raha hai.<br/>
-         <strong>10-15 seconds</strong> baad page refresh karein.</p>
+         <strong>10–15 seconds</strong> mein page refresh karein.</p>
+      <span class="badge-orange">🟡 Initializing</span>
       <script>setTimeout(()=>location.reload(),10000)</script>
     `));
     return;
@@ -157,20 +170,16 @@ const server = http.createServer(async (req, res) => {
       <p>WhatsApp → <strong>Linked Devices</strong> → Link a Device</p>
       <img src="${imgSrc}" alt="WhatsApp QR Code"/>
       <br/>
-      <span class="badge">Scan karein — 60 sec valid hai</span>
-      <p style="margin-top:16px;font-size:.8rem;color:#999">
-        Auto-refresh in 30s
-      </p>
+      <span class="badge-green">Scan karein — 60 sec valid</span>
+      <p style="margin-top:14px;font-size:.8rem;color:#aaa">Auto-refresh in 30s</p>
       <script>setTimeout(()=>location.reload(),30000)</script>
     `));
   } catch (err) {
-    res.end(HTML(`<h1 class="warn">QR Error</h1><p>${err.message}</p>`));
+    res.end(HTML(`<h1>QR Error</h1><p>${err.message}</p>`));
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`🌐 QR server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`🌐 QR server running on port ${PORT}`));
 // ────────────────────────────────────────────────────────────
 
 // ─── WHATSAPP CLIENT ────────────────────────────────────────
@@ -179,20 +188,12 @@ const client = new Client({
   puppeteer: {
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-default-apps',
-      '--disable-sync',
-      '--hide-scrollbars',
-      '--mute-audio',
+      '--no-sandbox', '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas',
+      '--disable-gpu', '--no-first-run', '--no-zygote',
+      '--single-process', '--disable-extensions',
+      '--disable-background-networking', '--disable-default-apps',
+      '--disable-sync', '--hide-scrollbars', '--mute-audio',
     ],
   },
 });
@@ -200,7 +201,7 @@ const client = new Client({
 client.on('qr', (qr) => {
   currentQR = qr;
   botReady  = false;
-  console.log('📱 QR ready — open your Railway domain to scan');
+  console.log('📱 QR ready — open Railway domain to scan');
 });
 
 client.on('ready', () => {
@@ -223,7 +224,6 @@ client.on('disconnected', (reason) => {
 
 // ─── MESSAGE HANDLER ────────────────────────────────────────
 client.on('message', async (msg) => {
-  // Ignore groups & status broadcasts
   const chat = await msg.getChat();
   if (chat.isGroup) return;
   if (msg.from === 'status@broadcast') return;
@@ -234,49 +234,49 @@ client.on('message', async (msg) => {
 
   if (!body) return;
 
+  // Helper: delay then reply (prevents ban)
+  const reply = async (text) => {
+    await randomDelay();
+    await msg.reply(text);
+  };
+
   try {
 
-    // ── GLOBAL: reset triggers ──────────────────────────────
+    // ── GLOBAL: start / menu ────────────────────────────────
     if (/^(hi|hello|salam|assalam|start|menu|order)$/i.test(body)) {
       resetSession(from);
       getSession(from).step = 'browsing';
-      await msg.reply(`Assalam-o-Alaikum! 👋\nKhush Amdeed!\n\n${formatMenu()}`);
+      await reply(`Assalam-o-Alaikum! 👋 Khush Amdeed!\n\n${formatMenu()}`);
       return;
     }
 
     // ── GLOBAL: cancel ──────────────────────────────────────
     if (/^cancel$/i.test(body)) {
       resetSession(from);
-      await msg.reply(
-        '❌ *Order cancel ho gaya.*\n\nDobara order karne ke liye *menu* likhein. 😊'
-      );
+      await reply('❌ *Order cancel ho gaya.*\n\nDobara order ke liye *menu* likhein. 😊');
       return;
     }
 
-    // ── STEP: browsing ──────────────────────────────────────
+    // ── STEP: browsing / confirm_more ───────────────────────
     if (session.step === 'browsing' || session.step === 'confirm_more') {
 
-      // "done" — proceed to checkout
       if (session.step === 'confirm_more' && /^done$/i.test(body)) {
         if (!session.cart.length) {
           session.step = 'browsing';
-          await msg.reply(`Cart khali hai!\n\n${formatMenu()}`);
+          await reply(`Cart khali hai!\n\n${formatMenu()}`);
           return;
         }
         session.step = 'ask_name';
-        await msg.reply('👤 Apna *naam* bhejein:');
+        await reply('👤 Apna *naam* bhejein:');
         return;
       }
 
-      // parse item numbers
-      const ids     = body.split(',').map(s => s.trim()).filter(Boolean);
-      const valid   = ids.map(id => MENU.find(m => m.id === id)).filter(Boolean);
-      const invalid = ids.filter(id => !MENU.find(m => m.id === id));
+      const ids   = body.split(',').map(s => s.trim()).filter(Boolean);
+      const valid = ids.map(id => MENU.find(m => m.id === id)).filter(Boolean);
+      const bad   = ids.filter(id => !MENU.find(m => m.id === id));
 
       if (!valid.length) {
-        await msg.reply(
-          '❓ Yeh number menu mein nahi hai.\n\nSahi number bhejein ya *menu* likhein.'
-        );
+        await reply('❓ Yeh number menu mein nahi hai.\nSahi number bhejein ya *menu* likhein.');
         return;
       }
 
@@ -288,50 +288,41 @@ client.on('message', async (msg) => {
 
       session.step = 'confirm_more';
       const { text } = buildCart(session.cart);
-
-      let reply = text;
-      if (invalid.length) reply += `\n\n⚠️ Yeh number menu mein nahi: *${invalid.join(', ')}*`;
-      reply += '\n\n➕ Aur items add karein\n✅ Order aage badhane ke liye: *done*';
-
-      await msg.reply(reply);
+      let r = text;
+      if (bad.length) r += `\n\n⚠️ Menu mein nahi: *${bad.join(', ')}*`;
+      r += '\n\n➕ Aur items add karein\n✅ Checkout ke liye: *done*';
+      await reply(r);
       return;
     }
 
     // ── STEP: ask_name ──────────────────────────────────────
     if (session.step === 'ask_name') {
-      if (body.length < 2) {
-        await msg.reply('⚠️ Kripya apna sahi *naam* likhein.');
-        return;
-      }
+      if (body.length < 2) { await reply('⚠️ Sahi *naam* likhein please.'); return; }
       session.name = body;
       session.step = 'ask_address';
-      await msg.reply('📍 Delivery *address* bhejein:\n(Gali, Muhalla, City)');
+      await reply('📍 Delivery *address* bhejein:\n(Gali, Muhalla, City)');
       return;
     }
 
     // ── STEP: ask_address ───────────────────────────────────
     if (session.step === 'ask_address') {
-      if (body.length < 5) {
-        await msg.reply('⚠️ Thoda detail mein *address* likhein please.');
-        return;
-      }
+      if (body.length < 5) { await reply('⚠️ Thoda detail mein *address* likhein.'); return; }
       session.address = body;
       session.step    = 'ask_phone';
-      await msg.reply('📞 Apna *contact number* bhejein:');
+      await reply('📞 Apna *contact number* bhejein:');
       return;
     }
 
     // ── STEP: ask_phone ─────────────────────────────────────
     if (session.step === 'ask_phone') {
       if (!/^[0-9+\s\-]{10,15}$/.test(body)) {
-        await msg.reply('⚠️ Sahi *phone number* bhejein\n(Jaise: 03001234567)');
+        await reply('⚠️ Sahi *phone number* bhejein\n(Jaise: 03001234567)');
         return;
       }
       session.phone = body;
       session.step  = 'final_confirm';
-
       const { text, total } = buildCart(session.cart);
-      await msg.reply(
+      await reply(
         `📋 *Order Summary*\n\n${text}\n\n` +
         `👤 Naam:    *${session.name}*\n` +
         `📍 Address: *${session.address}*\n` +
@@ -345,7 +336,7 @@ client.on('message', async (msg) => {
     // ── STEP: final_confirm ─────────────────────────────────
     if (session.step === 'final_confirm') {
       if (!/^(yes|haan|ji|confirm|ok|okay|ha)$/i.test(body)) {
-        await msg.reply('Confirm karne ke liye *yes* likhein\nCancel ke liye *cancel* likhein.');
+        await reply('Confirm ke liye *yes* likhein\nCancel ke liye *cancel* likhein.');
         return;
       }
 
@@ -364,44 +355,42 @@ client.on('message', async (msg) => {
 
       await saveOrder(order);
 
-      // Confirm to customer
-      await msg.reply(
+      await reply(
         `🎉 *Order Confirm Ho Gaya!*\n\n` +
         `🆔 Order ID: *${order.orderId}*\n` +
-        `💰 Total: *PKR ${total}*\n\n` +
+        `💰 Total: *Rs. ${total}*\n\n` +
         `⏳ Aapka order jald deliver ho ga.\n` +
         `Shukriya! 🙏`
       );
 
       // Notify owner
       const ownerMsg =
-        `🔔 *Naya Order Aya!*\n` +
+        `🔔 *Naya Order!*\n` +
         `━━━━━━━━━━━━━━━━━\n` +
         `🆔 ${order.orderId}\n` +
         `👤 ${order.name}\n` +
         `📞 ${order.phone}\n` +
         `📍 ${order.address}\n` +
         `━━━━━━━━━━━━━━━━━\n` +
-        order.items.map(i => `• ${i.qty}x ${i.name} = PKR ${i.qty * i.price}`).join('\n') +
+        order.items.map(i => `• ${i.qty}x ${i.name} = Rs. ${i.qty * i.price}`).join('\n') +
         `\n━━━━━━━━━━━━━━━━━\n` +
-        `💰 *Total: PKR ${total}*\n` +
+        `💰 *Total: Rs. ${total}*\n` +
         `🕐 ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}`;
 
       try {
+        await randomDelay();
         await client.sendMessage(OWNER_NUMBER, ownerMsg);
         console.log(`✅ Owner notified — ${order.orderId}`);
       } catch (err) {
-        console.error('❌ Owner notification failed:', err.message);
+        console.error('❌ Owner notify fail:', err.message);
       }
 
       resetSession(from);
       return;
     }
 
-    // ── DEFAULT (idle) ──────────────────────────────────────
-    await msg.reply(
-      'Assalam-o-Alaikum! 👋\n\nOrder karne ke liye *menu* likhein. 😊'
-    );
+    // ── DEFAULT ─────────────────────────────────────────────
+    await reply('Assalam-o-Alaikum! 👋\nOrder ke liye *menu* likhein. 😊');
 
   } catch (err) {
     console.error('Message handler error:', err);
