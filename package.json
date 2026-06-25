@@ -1,20 +1,23 @@
 {
-  "name": "whatsapp-order-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp order-taking bot using whatsapp-web.js",
+  "name": "whatsapp-food-bot",
+  "version": "2.0.0",
+  "description": "WhatsApp Food Ordering Bot",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": "18.x"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "qrcode": "^1.5.0",
     "qrcode-terminal": "^0.12.0",
-    "qrcode": "^1.5.3",
-    "express": "^4.19.2",
-    "whatsapp-web.js": "^1.34.7"
+    "whatsapp-web.js": "^1.23.0"
   },
-  "license": "ISC"
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
